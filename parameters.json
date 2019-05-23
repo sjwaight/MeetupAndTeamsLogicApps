@@ -1,0 +1,39 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentParameters.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "connections_teams_name": {
+            "value": "teamconnect"
+        },
+        "connections_keyvault_name": {
+            "value": "keyvaultconnect"
+        },
+        "connections_azuretables_name": {
+            "value": "tablesconnect"
+        },
+        "workflows_meetup_scraper_name": {
+            "value": "meetup-scraper"
+        },        
+        "vaults_meetupkeyvault_name": {
+            "value": "YOUR_KEYVAULT_NAME"
+        },
+        "storageAccounts_meetuplist_name": {
+            "value": "YOUR_TABLE_STORAGE_ACCOUNT"
+        },
+        "ad_service_principal": {
+            "value": "YOUR_AAD_SP_APP_ID"
+        },
+        "deployment_region": {
+            "value": "YOUR_DEPLOYMENT_REGION"
+        },
+        "target_teams_group_id": {
+            "value": "YOUR_TEAMS_ID"
+        },
+        "keyvault_1_token:clientSecret":{
+            "value": "YOUR_AAD_SP_PASSWORD"
+        },
+        "meetup_api_key": {
+            "value": "YOUR_API_KEY"
+        }
+    }
+}

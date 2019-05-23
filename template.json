@@ -1,0 +1,893 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "connections_teams_name": {
+            "defaultValue": "teams",
+            "type": "string"
+        },
+        "connections_keyvault_name": {
+            "defaultValue": "keyvault",
+            "type": "string"
+        },
+        "connections_azuretables_name": {
+            "defaultValue": "azuretables",
+            "type": "string"
+        },
+        "vaults_meetupkeyvault_name": {
+            "defaultValue": "meetupkeyvault",
+            "type": "string"
+        },
+        "keyvault_1_token:clientSecret": {
+        "type": "securestring",
+        "metadata": {
+            "description": "Client secret (password) of the Azure Active Directory application."
+        }
+        },
+        "keyvault_1_token:resourceUri": {
+        "type": "string",
+        "defaultValue": "https://vault.azure.net",
+        "metadata": {
+            "description": "The resource you are requesting authorization to use, for instance https://vault.azure.net"
+        }
+        },   
+        "keyvault_1_token:grantType": {
+        "type": "string",
+        "metadata": {
+            "description": "Grant type"
+        },
+        "defaultValue": "client_credentials",
+        "allowedValues": [
+                "code",
+                "client_credentials"
+            ]
+        }, 
+        "workflows_meetup_scraper_name": {
+            "defaultValue": "meetup-scraper",
+            "type": "string"
+        },
+        "storageAccounts_meetuplist_name": {
+            "defaultValue": "meetuplist",
+            "type": "string"
+        },
+        "ad_service_principal": {
+            "type": "string",
+            "metadata": {
+                "description": "Client (or Application) ID of the Azure Active Directory application."
+            }
+        },
+        "deployment_region": {
+            "defaultValue": "westus2",
+            "type": "string"
+        },
+        "target_teams_group_id": {
+            "type": "string"
+        },
+        "meetup_api_key": {
+            "type": "securestring"
+        }                    
+    },
+    "variables": {},
+    "resources": [
+        {
+            "type": "Microsoft.KeyVault/vaults",
+            "apiVersion": "2016-10-01",
+            "name": "[parameters('vaults_meetupkeyvault_name')]",
+            "location": "[parameters('deployment_region')]",
+            "properties": {
+                "sku": {
+                    "family": "A",
+                    "name": "Standard"
+                },
+                "tenantId": "[subscription().tenantId]",
+                "accessPolicies": [
+                    {
+                        "tenantId": "[subscription().tenantId]",
+                        "objectId": "[parameters('ad_service_principal')]",
+                        "permissions": {
+                            "keys": [],
+                            "secrets": [
+                                "Get"
+                            ],
+                            "certificates": []
+                        }
+                    }
+                ],
+                "enabledForDeployment": false,
+                "enabledForDiskEncryption": false,
+                "enabledForTemplateDeployment": false
+            }
+        },
+        {
+            "type": "Microsoft.Storage/storageAccounts",
+            "apiVersion": "2018-07-01",
+            "name": "[parameters('storageAccounts_meetuplist_name')]",
+            "location": "[parameters('deployment_region')]",
+            "sku": {
+                "name": "Standard_LRS",
+                "tier": "Standard"
+            },
+            "kind": "StorageV2",
+            "properties": {
+                "networkAcls": {
+                    "bypass": "AzureServices",
+                    "virtualNetworkRules": [],
+                    "ipRules": [],
+                    "defaultAction": "Allow"
+                },
+                "supportsHttpsTrafficOnly": true,
+                "encryption": {
+                    "services": {
+                        "file": {
+                            "enabled": true
+                        },
+                        "blob": {
+                            "enabled": true
+                        }
+                    },
+                    "keySource": "Microsoft.Storage"
+                },
+                "accessTier": "Hot"
+            }
+        },
+        {
+            "type": "Microsoft.KeyVault/vaults/secrets",
+            "apiVersion": "2016-10-01",
+            "name": "[concat(parameters('vaults_meetupkeyvault_name'), '/meetup-api-key')]",
+            "location": "[parameters('deployment_region')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.KeyVault/vaults', parameters('vaults_meetupkeyvault_name'))]"
+            ],
+            "properties": {
+                "attributes": {
+                    "enabled": true
+                },
+                "value": "[parameters('meetup_api_key')]"
+            }            
+        },
+        {
+            "properties": {
+              "state": "Enabled",
+              "definition": {
+                "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+                "actions": {
+                  "For_each_meetup": {
+                    "type": "Foreach",
+                    "foreach": "@body('Read_meetups_from_table_storage')?['value']",
+                    "actions": {
+                      "Call_Meetup_REST_API": {
+                        "type": "Http",
+                        "inputs": {
+                          "method": "GET",
+                          "uri": "@{concat('https://api.meetup.com/', body('Convert_Entity_into_Object')?['RowKey'], '/events/')}",
+                          "queries": {
+                            "key": "@body('Read_Meetup_API_key_from_Key_Vault')?['value']",
+                            "no_earlier_than": "@body('Convert_Entity_into_Object')?['LastEventTime']",
+                            "no_later_than": "@{addToTime(body('Convert_Entity_into_Object')?['LastEventTime'], 30, 'Day')}",
+                            "page": "2",
+                            "status": "upcoming"
+                          }
+                        },
+                        "runAfter": {
+                          "Delay": [
+                            "Succeeded"
+                          ]
+                        }
+                      },
+                      "Convert_Entity_into_Object": {
+                        "type": "ParseJson",
+                        "inputs": {
+                          "content": "@items('For_each_meetup')",
+                          "schema": {
+                            "properties": {
+                              "LastEventId": {
+                                "type": "string"
+                              },
+                              "LastEventTime": {
+                                "type": "string"
+                              },
+                              "PartitionKey": {
+                                "type": "string"
+                              },
+                              "RowKey": {
+                                "type": "string"
+                              },
+                              "TeamChannel": {
+                                "type": "string"
+                              },
+                              "odata.etag": {
+                                "type": "string"
+                              }
+                            },
+                            "type": "object"
+                          }
+                        },
+                        "runAfter": {}
+                      },
+                      "Delay": {
+                        "type": "Wait",
+                        "inputs": {
+                          "interval": {
+                            "count": 15,
+                            "unit": "Second"
+                          }
+                        },
+                        "runAfter": {
+                          "Convert_Entity_into_Object": [
+                            "Succeeded"
+                          ]
+                        },
+                        "description": "Required to avoid throttling by the Meetup API"
+                      },
+                      "Did_we_receive_any_results_back": {
+                        "type": "If",
+                        "expression": {
+                          "and": [
+                            {
+                              "not": {
+                                "equals": [
+                                  "@body('Call_Meetup_REST_API')",
+                                  "[[]]"
+                                ]
+                              }
+                            },
+                            {
+                              "equals": [
+                                "@outputs('Call_Meetup_REST_API')['statusCode']",
+                                200
+                              ]
+                            }
+                          ]
+                        },
+                        "actions": {
+                          "For_each": {
+                            "type": "Foreach",
+                            "foreach": "@body('Parse_REST_response_JSON')",
+                            "actions": {
+                              "Convert_Channel_Item_to_object": {
+                                "type": "ParseJson",
+                                "inputs": {
+                                  "content": "@first(body('Parse_Channel_List_Item'))",
+                                  "schema": {
+                                    "properties": {
+                                      "description": {},
+                                      "displayName": {
+                                        "type": "string"
+                                      },
+                                      "email": {
+                                        "type": "string"
+                                      },
+                                      "id": {
+                                        "type": "string"
+                                      },
+                                      "isFavoriteByDefault": {},
+                                      "webUrl": {
+                                        "type": "string"
+                                      }
+                                    },
+                                    "type": "object"
+                                  }
+                                },
+                                "runAfter": {
+                                  "Parse_Channel_List_Item": [
+                                    "Succeeded"
+                                  ]
+                                }
+                              },
+                              "Filter_array": {
+                                "type": "Query",
+                                "inputs": {
+                                  "from": "@body('List_Dev_Speaker_Teams_Channels')?['value']",
+                                  "where": "@equals(item()?['displayName'], body('Convert_Entity_into_Object')?['TeamChannel'])"
+                                },
+                                "runAfter": {}
+                              },
+                              "Parse_Channel_List_Item": {
+                                "type": "ParseJson",
+                                "inputs": {
+                                  "content": "@body('Filter_array')",
+                                  "schema": {
+                                    "items": {
+                                      "properties": {
+                                        "description": {},
+                                        "displayName": {
+                                          "type": "string"
+                                        },
+                                        "email": {
+                                          "type": "string"
+                                        },
+                                        "id": {
+                                          "type": "string"
+                                        },
+                                        "isFavoriteByDefault": {},
+                                        "webUrl": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "required": [
+                                        "id",
+                                        "displayName",
+                                        "description",
+                                        "isFavoriteByDefault",
+                                        "email",
+                                        "webUrl"
+                                      ],
+                                      "type": "object"
+                                    },
+                                    "type": "array"
+                                  }
+                                },
+                                "runAfter": {
+                                  "Filter_array": [
+                                    "Succeeded"
+                                  ]
+                                }
+                              },
+                              "Post_Meetup_to_Community_Speaker_City_Channel": {
+                                "runAfter": {
+                                  "Update_Meetup_record": [
+                                    "Succeeded"
+                                  ]
+                                },
+                                "type": "ApiConnection",
+                                "inputs": {
+                                  "body": {
+                                    "messageBody": "@variables('AdaptiveCard')",
+                                    "recipient": {
+                                      "channelId": "@variables('ChannelItem')"
+                                    }
+                                  },
+                                  "host": {
+                                    "connection": {
+                                      "name": "@parameters('$connections')['teams']['connectionId']"
+                                    }
+                                  },
+                                  "method": "post",
+                                  "path": "/flowbot/actions/adaptivecard/recipienttypes/channel",
+                                  "queries": {
+                                    "groupId": "e65711ea-db37-4af6-916f-3290397471c6"
+                                  }
+                                }
+                              },
+                              "Set_AdaptiveCard_variable": {
+                                "type": "SetVariable",
+                                "inputs": {
+                                  "name": "AdaptiveCard",
+                                  "value": "{\n    \"type\": \"AdaptiveCard\",\n    \"body\": [\n        {\n            \"type\": \"Container\",\n            \"items\": [\n                {\n                    \"type\": \"TextBlock\",\n                    \"size\": \"Medium\",\n                    \"weight\": \"Bolder\",\n                    \"text\": \"New Meetup: @{items('For_each')['name']}\"\n                }\n            ]\n        },\n        {\n            \"type\": \"Container\",\n            \"items\": [\n                {\n                    \"type\": \"FactSet\",\n                    \"facts\": [\n                        {\n                            \"title\": \"User Group:\",\n                            \"value\": \"@{items('For_each')?['group']?['name']}\"\n                        },                       \n                        {\n                            \"title\": \"Date:\",\n                            \"value\": \"@{items('For_each')['local_time']}, @{items('For_each')['local_date']}\"\n                        },                       \n                        {\n                            \"title\": \"Location:\",\n                            \"value\": \"@{items('For_each')?['group']?['localized_location']}\"\n                        }\n                    ]\n                }\n            ]\n        }\n    ],\n    \"actions\": [   \n        {\n            \"type\": \"Action.OpenUrl\",\n            \"title\": \"View Details on Meetup\",\n            \"url\": \"@{items('For_each')['link']}\"\n        }\n    ],\n    \"$schema\": \"http://adaptivecards.io/schemas/adaptive-card.json\",\n    \"version\": \"1.0\"\n}"
+                                },
+                                "runAfter": {
+                                  "Set_Teams_Channel_list_variable": [
+                                    "Succeeded"
+                                  ]
+                                }
+                              },
+                              "Set_EventTime_variable": {
+                                "type": "SetVariable",
+                                "inputs": {
+                                  "name": "EventFilterTime",
+                                  "value": "@{items('For_each')['local_date']}T@{items('For_each')['local_time']}"
+                                },
+                                "runAfter": {
+                                  "Set_AdaptiveCard_variable": [
+                                    "Succeeded"
+                                  ]
+                                }
+                              },
+                              "Set_Teams_Channel_list_variable": {
+                                "type": "SetVariable",
+                                "inputs": {
+                                  "name": "ChannelItem",
+                                  "value": "@body('Convert_Channel_Item_to_object')?['id']"
+                                },
+                                "runAfter": {
+                                  "Convert_Channel_Item_to_object": [
+                                    "Succeeded"
+                                  ]
+                                }
+                              },
+                              "Update_Meetup_record": {
+                                "runAfter": {
+                                  "Set_EventTime_variable": [
+                                    "Succeeded"
+                                  ]
+                                },
+                                "type": "ApiConnection",
+                                "inputs": {
+                                  "body": {
+                                    "LastEventId": "@{items('For_each')['id']}",
+                                    "LastEventTime": "@{addToTime(variables('EventFilterTime'), 1, 'Minute')}",
+                                    "TeamChannel": "@{body('Convert_Entity_into_Object')?['TeamChannel']}",
+                                    "Track": "@true"
+                                  },
+                                  "headers": {
+                                    "If-Match": "*"
+                                  },
+                                  "host": {
+                                    "connection": {
+                                      "name": "@parameters('$connections')['azuretables']['connectionId']"
+                                    }
+                                  },
+                                  "method": "put",
+                                  "path": "/Tables/@{encodeURIComponent('meetups')}/entities/etag(PartitionKey='@{encodeURIComponent(items('For_each_meetup')?['PartitionKey'])}',RowKey='@{encodeURIComponent(items('For_each_meetup')?['RowKey'])}')"
+                                }
+                              }
+                            },
+                            "runAfter": {
+                              "Parse_REST_response_JSON": [
+                                "Succeeded"
+                              ]
+                            }
+                          },
+                          "Parse_REST_response_JSON": {
+                            "type": "ParseJson",
+                            "inputs": {
+                              "content": "@body('Call_Meetup_REST_API')",
+                              "schema": {
+                                "items": {
+                                  "properties": {
+                                    "created": {
+                                      "type": "integer"
+                                    },
+                                    "date_in_series_pattern": {
+                                      "type": "boolean"
+                                    },
+                                    "description": {
+                                      "type": "string"
+                                    },
+                                    "duration": {
+                                      "type": "integer"
+                                    },
+                                    "group": {
+                                      "properties": {
+                                        "country": {
+                                          "type": "string"
+                                        },
+                                        "created": {
+                                          "type": "integer"
+                                        },
+                                        "id": {
+                                          "type": "integer"
+                                        },
+                                        "join_mode": {
+                                          "type": "string"
+                                        },
+                                        "lat": {
+                                          "type": "number"
+                                        },
+                                        "localized_location": {
+                                          "type": "string"
+                                        },
+                                        "lon": {
+                                          "type": "number"
+                                        },
+                                        "name": {
+                                          "type": "string"
+                                        },
+                                        "region": {
+                                          "type": "string"
+                                        },
+                                        "state": {
+                                          "type": "string"
+                                        },
+                                        "timezone": {
+                                          "type": "string"
+                                        },
+                                        "urlname": {
+                                          "type": "string"
+                                        },
+                                        "who": {
+                                          "type": "string"
+                                        }
+                                      },
+                                      "type": "object"
+                                    },
+                                    "how_to_find_us": {
+                                      "type": "string"
+                                    },
+                                    "id": {
+                                      "type": "string"
+                                    },
+                                    "link": {
+                                      "type": "string"
+                                    },
+                                    "local_date": {
+                                      "type": "string"
+                                    },
+                                    "local_time": {
+                                      "type": "string"
+                                    },
+                                    "name": {
+                                      "type": "string"
+                                    },
+                                    "rsvp_limit": {
+                                      "type": "integer"
+                                    },
+                                    "status": {
+                                      "type": "string"
+                                    },
+                                    "time": {
+                                      "type": "integer"
+                                    },
+                                    "updated": {
+                                      "type": "integer"
+                                    },
+                                    "utc_offset": {
+                                      "type": "integer"
+                                    },
+                                    "venue": {
+                                      "properties": {
+                                        "address_1": {
+                                          "type": "string"
+                                        },
+                                        "city": {
+                                          "type": "string"
+                                        },
+                                        "country": {
+                                          "type": "string"
+                                        },
+                                        "id": {
+                                          "type": "integer"
+                                        },
+                                        "lat": {
+                                          "type": "number"
+                                        },
+                                        "localized_country_name": {
+                                          "type": "string"
+                                        },
+                                        "lon": {
+                                          "type": "number"
+                                        },
+                                        "name": {
+                                          "type": "string"
+                                        },
+                                        "repinned": {
+                                          "type": "boolean"
+                                        }
+                                      },
+                                      "type": "object"
+                                    },
+                                    "visibility": {
+                                      "type": "string"
+                                    },
+                                    "waitlist_count": {
+                                      "type": "integer"
+                                    },
+                                    "yes_rsvp_count": {
+                                      "type": "integer"
+                                    }
+                                  },
+                                  "required": [
+                                    "created",
+                                    "id",
+                                    "name",
+                                    "date_in_series_pattern",
+                                    "status",
+                                    "time",
+                                    "local_date",
+                                    "local_time",
+                                    "updated",
+                                    "utc_offset",
+                                    "group",
+                                    "link",
+                                    "description",
+                                    "visibility"
+                                  ],
+                                  "type": "object"
+                                },
+                                "type": "array"
+                              }
+                            },
+                            "runAfter": {}
+                          }
+                        },
+                        "runAfter": {
+                          "Call_Meetup_REST_API": [
+                            "Succeeded"
+                          ]
+                        },
+                        "else": {
+                          "actions": {
+                            "Check_if_Event_Date_was_from_the_API_originally": {
+                              "type": "If",
+                              "expression": {
+                                "and": [
+                                  {
+                                    "less": [
+                                      "@ticks(body('Convert_Entity_into_Object')?['LastEventTime'])",
+                                      "@ticks(utcNow())"
+                                    ]
+                                  }
+                                ]
+                              },
+                              "actions": {
+                                "Set_Event_Time_to_UTC_Now": {
+                                  "type": "SetVariable",
+                                  "inputs": {
+                                    "name": "EventTime",
+                                    "value": " @{formatDateTime(utcNow(), 'yyyy-MM-ddT00:00')}"
+                                  },
+                                  "runAfter": {}
+                                }
+                              },
+                              "runAfter": {},
+                              "else": {
+                                "actions": {
+                                  "Set_Event_Time_to_value_stored_in_table_storage_already": {
+                                    "type": "SetVariable",
+                                    "inputs": {
+                                      "name": "EventTime",
+                                      "value": "@body('Convert_Entity_into_Object')?['LastEventTime']"
+                                    },
+                                    "runAfter": {}
+                                  }
+                                }
+                              }
+                            },
+                            "Update_Meetup_with_today's_date": {
+                              "runAfter": {
+                                "Check_if_Event_Date_was_from_the_API_originally": [
+                                  "Succeeded"
+                                ]
+                              },
+                              "type": "ApiConnection",
+                              "inputs": {
+                                "body": {
+                                  "LastEventId": "@{body('Convert_Entity_into_Object')?['LastEventId']}",
+                                  "LastEventTime": "@{variables('EventTime')}",
+                                  "TeamChannel": "@{body('Convert_Entity_into_Object')?['TeamChannel']}",
+                                  "Track": "@true"
+                                },
+                                "headers": {
+                                  "If-Match": "*"
+                                },
+                                "host": {
+                                  "connection": {
+                                    "name": "@parameters('$connections')['azuretables']['connectionId']"
+                                  }
+                                },
+                                "method": "put",
+                                "path": "/Tables/@{encodeURIComponent('meetups')}/entities/etag(PartitionKey='@{encodeURIComponent(items('For_each_meetup')?['PartitionKey'])}',RowKey='@{encodeURIComponent(items('For_each_meetup')?['RowKey'])}')"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "runAfter": {
+                      "Read_meetups_from_table_storage": [
+                        "Succeeded"
+                      ]
+                    }
+                  },
+                  "Initialize_AdaptiveCard_variable": {
+                    "type": "InitializeVariable",
+                    "inputs": {
+                      "variables": [
+                        {
+                          "name": "AdaptiveCard",
+                          "type": "String"
+                        }
+                      ]
+                    },
+                    "runAfter": {
+                      "Initialize_EventFilterTime_variable": [
+                        "Succeeded"
+                      ]
+                    }
+                  },
+                  "Initialize_EventFilterTime_variable": {
+                    "type": "InitializeVariable",
+                    "inputs": {
+                      "variables": [
+                        {
+                          "name": "EventFilterTime",
+                          "type": "String"
+                        }
+                      ]
+                    },
+                    "runAfter": {}
+                  },
+                  "Initialize_Event_Time_variable": {
+                    "type": "InitializeVariable",
+                    "inputs": {
+                      "variables": [
+                        {
+                          "name": "EventTime",
+                          "type": "String"
+                        }
+                      ]
+                    },
+                    "runAfter": {
+                      "Initialize_Teams_Channel_variable": [
+                        "Succeeded"
+                      ]
+                    }
+                  },
+                  "Initialize_Teams_Channel_variable": {
+                    "type": "InitializeVariable",
+                    "inputs": {
+                      "variables": [
+                        {
+                          "name": "ChannelItem",
+                          "type": "String"
+                        }
+                      ]
+                    },
+                    "runAfter": {
+                      "Initialize_AdaptiveCard_variable": [
+                        "Succeeded"
+                      ]
+                    }
+                  },
+                  "List_Dev_Speaker_Teams_Channels": {
+                    "runAfter": {
+                      "Read_Meetup_API_key_from_Key_Vault": [
+                        "Succeeded"
+                      ]
+                    },
+                    "type": "ApiConnection",
+                    "inputs": {
+                      "host": {
+                        "connection": {
+                          "name": "@parameters('$connections')['teams']['connectionId']"
+                        }
+                      },
+                      "method": "get",
+                      "path": "[concat('beta/groups/', parameters('target_teams_group_id') ,'/channels')]"
+                    }
+                  },
+                  "Read_Meetup_API_key_from_Key_Vault": {
+                    "runAfter": {
+                      "Initialize_Event_Time_variable": [
+                        "Succeeded"
+                      ]
+                    },
+                    "type": "ApiConnection",
+                    "inputs": {
+                      "host": {
+                        "connection": {
+                          "name": "@parameters('$connections')['keyvault']['connectionId']"
+                        }
+                      },
+                      "method": "get",
+                      "path": "/secrets/@{encodeURIComponent('meetup-api-key')}/value"
+                    }
+                  },
+                  "Read_meetups_from_table_storage": {
+                    "runAfter": {
+                      "List_Dev_Speaker_Teams_Channels": [
+                        "Succeeded"
+                      ]
+                    },
+                    "type": "ApiConnection",
+                    "inputs": {
+                      "host": {
+                        "connection": {
+                          "name": "@parameters('$connections')['azuretables']['connectionId']"
+                        }
+                      },
+                      "method": "get",
+                      "path": "/Tables/@{encodeURIComponent('meetups')}/entities",
+                      "queries": {
+                        "$filter": "Track eq true",
+                        "$select": "PartitionKey, RowKey, LastEventTime, LastEventId, TeamChannel"
+                      }
+                    }
+                  }
+                },
+                "parameters": {
+                  "$connections": {
+                    "defaultValue": {},
+                    "type": "Object"
+                  }
+                },
+                "triggers": {
+                  "Recurrence": {
+                    "type": "Recurrence",
+                    "recurrence": {
+                      "frequency": "Week",
+                      "interval": 1,
+                      "schedule": {
+                        "weekDays": [
+                          "Tuesday",
+                          "Thursday",
+                          "Sunday"
+                        ],
+                        "hours": [
+                          "4"
+                        ]
+                      }
+                    }
+                  }
+                },
+                "contentVersion": "1.0.0.0",
+                "outputs": {}
+              },
+              "parameters": {
+                "$connections": {
+                  "value": {
+                    "teams": {
+                      "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', parameters('deployment_region'), '/managedApis/', 'teams')]",
+                      "connectionId": "[resourceId('Microsoft.Web/connections', parameters('connections_teams_name'))]",
+                      "connectionName": "[parameters('connections_teams_name')]"
+                    },
+                    "azuretables": {
+                      "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', parameters('deployment_region'), '/managedApis/', 'azuretables')]",
+                      "connectionId": "[resourceId('Microsoft.Web/connections', parameters('connections_azuretables_name'))]",
+                      "connectionName": "[parameters('connections_azuretables_name')]"
+                    },
+                    "keyvault": {
+                      "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', parameters('deployment_region'), '/managedApis/', 'keyvault')]",
+                      "connectionId": "[resourceId('Microsoft.Web/connections', parameters('connections_keyvault_name'))]",
+                      "connectionName": "[parameters('connections_keyvault_name')]"
+                    }
+                  }
+                }
+              }
+            },
+            "name": "[parameters('workflows_meetup_scraper_name')]",
+            "type": "Microsoft.Logic/workflows",
+            "location": "[parameters('deployment_region')]",
+            "tags": {
+              "displayName": "LogicApp"
+            },
+            "apiVersion": "2016-06-01",
+            "dependsOn": [
+              "[resourceId('Microsoft.Web/connections', parameters('connections_teams_name'))]",
+              "[resourceId('Microsoft.Web/connections', parameters('connections_azuretables_name'))]",
+              "[resourceId('Microsoft.Web/connections', parameters('connections_keyvault_name'))]"
+            ]
+          },
+          {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[parameters('connections_teams_name')]",
+            "location": "[parameters('deployment_region')]",
+            "properties": {
+              "api": {
+                "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', parameters('deployment_region'), '/managedApis/', 'teams')]"
+              },
+              "displayName": "[parameters('connections_teams_name')]"
+            }
+          },
+          {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[parameters('connections_keyvault_name')]",
+            "location": "[parameters('deployment_region')]",
+            "properties": {
+              "api": {
+                "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', parameters('deployment_region'), '/managedApis/', 'keyvault')]"
+              },
+              "displayName": "[parameters('connections_keyvault_name')]",
+              "parameterValues": {
+                "vaultName": "[parameters('vaults_meetupkeyvault_name')]",
+                "token:clientId": "[parameters('ad_service_principal')]",
+                "token:clientSecret": "[parameters('keyvault_1_token:clientSecret')]",
+                "token:TenantId": "[subscription().tenantId]",
+                "token:resourceUri": "[parameters('keyvault_1_token:resourceUri')]",
+                "token:grantType": "[parameters('keyvault_1_token:grantType')]"
+              }
+            }
+          },
+          {
+            "type": "Microsoft.Web/connections",
+            "apiVersion": "2016-06-01",
+            "name": "[parameters('connections_azuretables_name')]",
+            "location": "[parameters('deployment_region')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccounts_meetuplist_name'))]"
+            ],
+            "properties": {
+              "api": {
+                "id": "[concat(subscription().id, '/providers/Microsoft.Web/locations/', parameters('deployment_region'), '/managedApis/', 'azuretables')]"
+              },
+              "displayName": "[parameters('connections_azuretables_name')]",
+              "parameterValues": {
+                "storageaccount": "[parameters('storageAccounts_meetuplist_name')]",
+                "sharedkey": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccounts_meetuplist_name')), providers('Microsoft.Storage', 'storageAccounts').apiVersions[0]).keys[0].value]"
+              }
+            }
+          }
+    ]
+}
